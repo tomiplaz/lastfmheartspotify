@@ -38,7 +38,7 @@ class LastFm:
         ))
 
     def getlovedtracks(self):
-        url = self._get_method_url('.'.join(('use', 'getlovedtracks')))
+        url = self._get_method_url('.'.join(('user', 'getlovedtracks')))
         request = Request(url=url, headers=self.common_headers)
 
         try:
