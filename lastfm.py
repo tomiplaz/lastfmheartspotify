@@ -40,10 +40,10 @@ class LastFm:
     def get_loved_tracks(self):
         method = '.'.join(('user', 'getlovedtracks'))
         page = 0
-        pages = 0
+        pages = 1
         items = []
 
-        while page == 0 or page < pages:
+        while page < pages:
             page += 1
             url = self._get_url({ 'method': method, 'page': str(page) })
             request = Request(url=url, headers=self.common_headers)
