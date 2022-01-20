@@ -15,7 +15,7 @@ class LastFm:
         self.common_params = {
             'api_key': LastFm.api_key,
             'user': user,
-            'format': 'json'
+            'format': 'json',
         }
         self.common_headers = {
             'Accept': 'application/json'
@@ -24,7 +24,7 @@ class LastFm:
     def _get_params_string(self, params_dict):
         return '&'.join(['='.join((k, v)) for k, v in params_dict.items()])
 
-    def _get_method_url(self, method):
+    def _get_url(self, params):
         return urlunparse((
             LastFm.scheme,
             LastFm.netloc,
@@ -32,18 +32,31 @@ class LastFm:
             '',
             self._get_params_string({
                 **self.common_params,
-                'method': method
+                **params,
             }),
             ''
         ))
 
-    def getlovedtracks(self):
-        url = self._get_method_url('.'.join(('user', 'getlovedtracks')))
-        request = Request(url=url, headers=self.common_headers)
+    def get_loved_tracks(self):
+        method = '.'.join(('user', 'getlovedtracks'))
+        page = 0
+        pages = 0
+        items = []
 
-        try:
-            response = urlopen(request)
-            return jsonloads(response.read())
-        except HTTPError as e:
-            print('\n'.join((str(e), jsonloads(e.read())['message'], url)))
-            sys.exit()
+        while page == 0 or page < pages:
+            page += 1
+            url = self._get_url({ 'method': method, 'page': str(page) })
+            request = Request(url=url, headers=self.common_headers)
+
+            try:
+                response = urlopen(request)
+                data = jsonloads(response.read())['lovedtracks']
+                items = items + [(x['artist']['name'], x['name']) for x in data['track']]
+                attrs = data['@attr']
+                pages = int(attrs['totalPages'])
+                print(str(len(items)) + '/' + attrs['total'])
+            except HTTPError as e:
+                print('\n'.join((str(e), jsonloads(e.read())['message'], url)))
+                sys.exit()
+
+        return items
