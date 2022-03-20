@@ -1,19 +1,19 @@
-import sys
+from sys import exit
 from urllib.parse import urlunparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from json import loads as jsonloads
+from env import last_fm_api_key
 
 class LastFm:
     scheme = 'http'
     netloc = 'ws.audioscrobbler.com'
     path = '/2.0/'
-    api_key = '9fd1cb3c8e24f418ac7b0166bfca3427'
 
     def __init__(self, user):
         self.user = user
         self.common_params = {
-            'api_key': LastFm.api_key,
+            'api_key': last_fm_api_key,
             'user': user,
             'format': 'json',
         }
@@ -57,6 +57,6 @@ class LastFm:
                 print(str(len(items)) + '/' + attrs['total'])
             except HTTPError as e:
                 print('\n'.join((str(e), jsonloads(e.read())['message'], url)))
-                sys.exit()
+                exit()
 
         return items
