@@ -41,6 +41,7 @@ class LastFm:
         method = '.'.join(('user', 'getlovedtracks'))
         page = 0
         pages = 1
+        total = 0
         items = []
 
         while page < pages:
@@ -54,7 +55,7 @@ class LastFm:
                 items = items + [(x['artist']['name'], x['name']) for x in data['track']]
                 attrs = data['@attr']
                 pages = int(attrs['totalPages'])
-                print(str(len(items)) + '/' + attrs['total'])
+                total = int(attrs['total'])
             except HTTPError as e:
                 print('\n'.join((str(e), jsonloads(e.read())['message'], url)))
                 exit()
