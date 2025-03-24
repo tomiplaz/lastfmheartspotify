@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -22,7 +23,10 @@ type LovedTrack struct {
 
 type LovedTracksResponse struct {
 	LovedTracks struct {
-		Track []LovedTrack
+		Track []LovedTrack `json:"track"`
+		Attr  struct {
+			TotalPages string `json:"totalPages"`
+		} `json:"@attr"`
 	} `json:"lovedtracks"`
 }
 
@@ -40,30 +44,50 @@ func (lastFm LastFm) GetLovedTracks() ([]LovedTrack, error) {
 		"method":  "user.getlovedtracks",
 		"format":  "json",
 	}
-	url := fmt.Sprintf("http://ws.audioscrobbler.com/2.0?%s&page=1", getQueryStr(params))
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+
+	allTracks := []LovedTrack{}
+	page := 0
+	pages := 1
+
+	for page < pages {
+		page++
+		params["page"] = fmt.Sprintf("%d", page)
+		url := fmt.Sprintf("http://ws.audioscrobbler.com/2.0?%s", getQueryStr(params))
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+
+		req.Header.Add("Accept", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("do request: %w", err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read response body: %w", err)
+		}
+
+		var parsed LovedTracksResponse
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, fmt.Errorf("parse json: %w", err)
+		}
+
+		allTracks = append(allTracks, parsed.LovedTracks.Track...)
+		pages, err = strconv.Atoi(parsed.LovedTracks.Attr.TotalPages)
+		if err != nil {
+			return nil, fmt.Errorf("parse total pages: %w", err)
+		}
+
+		fmt.Printf("Fetched page %d of %d.\n", page, pages)
 	}
 
-	req.Header.Add("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
+	fmt.Printf("Total tracks: %d\n", len(allTracks))
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
-	var parsed LovedTracksResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("parse json: %w", err)
-	}
-
-	return parsed.LovedTracks.Track, nil
+	return allTracks, nil
 }
 
 func getQueryStr(m map[string]string) string {
