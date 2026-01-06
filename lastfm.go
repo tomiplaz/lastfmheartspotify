@@ -45,7 +45,7 @@ func (lastFm LastFm) fetchPage(page int, params map[string]string, progressCh ch
 	// Create a copy of params to avoid modifying the original
 	pageParams := make(map[string]string)
 	maps.Copy(pageParams, params)
-	// Set the page parameter for this specific request
+
 	pageParams["page"] = fmt.Sprintf("%d", page)
 
 	url := fmt.Sprintf("http://ws.audioscrobbler.com/2.0?%s", getQueryStr(pageParams))
@@ -77,7 +77,6 @@ func (lastFm LastFm) fetchPage(page int, params map[string]string, progressCh ch
 		return nil, 0, fmt.Errorf("parse total pages: %w", err)
 	}
 
-	// Send progress update through channel
 	if progressCh != nil {
 		progressCh <- page
 	}
@@ -86,6 +85,7 @@ func (lastFm LastFm) fetchPage(page int, params map[string]string, progressCh ch
 }
 
 func (lastFm LastFm) GetLovedTracks() ([]LovedTrack, error) {
+	maxCon := 10
 	params := map[string]string{
 		"api_key": lastFm.apiKey,
 		"user":    lastFm.user,
@@ -94,7 +94,7 @@ func (lastFm LastFm) GetLovedTracks() ([]LovedTrack, error) {
 	}
 
 	// Create a progress channel
-	progressCh := make(chan int, 20) // Buffer to prevent blocking
+	progressCh := make(chan int, maxCon)
 
 	// Start a goroutine to handle progress reporting
 	var totalPages int
@@ -106,15 +106,17 @@ func (lastFm LastFm) GetLovedTracks() ([]LovedTrack, error) {
 			// Only print if we know the total
 			if totalPages > 0 {
 				percentage = int(float64(len(completed)) / float64(totalPages) * 100)
-				fmt.Printf("\rProgress: %d%s", percentage, "%")
-			}
-			if percentage == 100 {
-				fmt.Println()
+				if percentage <= 100 {
+					fmt.Printf("\rProgress: %d%s", percentage, "%")
+				}
+				if percentage == 100 {
+					fmt.Println()
+				}
 			}
 		}
 	}()
 
-	// First, fetch page 1 to determine the total number of pages
+	// Fetch page 1 to determine the total number of pages
 	firstPageTracks, pages, err := lastFm.fetchPage(1, params, progressCh)
 	if err != nil {
 		close(progressCh)
@@ -123,7 +125,7 @@ func (lastFm LastFm) GetLovedTracks() ([]LovedTrack, error) {
 	totalPages = pages
 
 	// Initialize result slice with first page results
-	allTracks := make([]LovedTrack, 0, totalPages*50) // Estimate capacity based on ~50 tracks per page
+	allTracks := make([]LovedTrack, 0, totalPages*50)
 	allTracks = append(allTracks, firstPageTracks...)
 
 	// If there's only one page, we're done
@@ -133,62 +135,54 @@ func (lastFm LastFm) GetLovedTracks() ([]LovedTrack, error) {
 		return allTracks, nil
 	}
 
-	// Use a wait group to synchronize all goroutines
-	var wg sync.WaitGroup
-
-	// Use a mutex to protect concurrent writes to allTracks
-	var mu sync.Mutex
-
-	// Create an error variable to track if any errors occur
+	var pagesWg sync.WaitGroup
 	var fetchErr error
-	// Use a mutex to protect access to the error variable
-	var errMu sync.Mutex
+	var tracksMu, fetchErrMu sync.Mutex
 
-	// Limit concurrency to at most 10 goroutines
-	// Create a semaphore with buffer of maxConcurrent (10)
-	const maxConcurrent = 10
-	sem := make(chan struct{}, maxConcurrent)
+	// Semaphore to allow max page fetching goroutines
+	pageSem := make(chan struct{}, maxCon)
 
-	// Start goroutines for pages 2 to totalPages
+	// Start goroutines for the remaining pages
 	for page := 2; page <= totalPages; page++ {
-		wg.Add(1)
-		go func(p int) {
-			defer wg.Done()
+		// Reassign to prevent race condition
+		p := page
 
-			// Acquire semaphore (blocks if maxConcurrent goroutines are active)
-			sem <- struct{}{}
-			defer func() { <-sem }() // Release semaphore when done
+		// Start goroutine to fetch page
+		pagesWg.Go(func() {
+			// Acquire semaphore (blocks if max)
+			pageSem <- struct{}{}
+			// Release semaphore when done
+			defer func() { <-pageSem }()
 
-			// Fetch the page
+			// Fetch page
 			tracks, _, err := lastFm.fetchPage(p, params, progressCh)
 			if err != nil {
 				// Save the first error we encounter
-				errMu.Lock()
+				fetchErrMu.Lock()
 				if fetchErr == nil {
 					fetchErr = fmt.Errorf("error fetching page %d: %w", p, err)
 				}
-				errMu.Unlock()
+				fetchErrMu.Unlock()
 				return
 			}
 
-			// Safely append tracks to the result slice
-			mu.Lock()
+			// Safely append tracks
+			tracksMu.Lock()
 			allTracks = append(allTracks, tracks...)
-			mu.Unlock()
-		}(page)
+			tracksMu.Unlock()
+		})
 	}
 
-	// Wait for all goroutines to complete
-	wg.Wait()
-	// Close the progress channel since we're done sending updates
+	pagesWg.Wait()
+
 	close(progressCh)
 
-	// Check if any errors occurred
 	if fetchErr != nil {
 		return nil, fetchErr
 	}
 
 	fmt.Printf("Total tracks: %d\n", len(allTracks))
+
 	return allTracks, nil
 }
 
