@@ -3,10 +3,15 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -21,6 +26,10 @@ const (
 var state string
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Fatalln("error loading .env file")
+	}
+
 	http.HandleFunc("/login", login)
 	http.HandleFunc("/callback", callback)
 
@@ -61,25 +70,47 @@ func callback(w http.ResponseWriter, req *http.Request) {
 	data.Set("code", params.Get("code"))
 	data.Set("redirect_uri", redirectURI)
 
-	body := strings.NewReader(data.Encode())
-	tokenReq, err := http.NewRequestWithContext(req.Context(), "POST", apiTokenURL, body)
+	reqBody := strings.NewReader(data.Encode())
+	req, err := http.NewRequestWithContext(req.Context(), "POST", apiTokenURL, reqBody)
 	if err != nil {
 		fmt.Println("error creating token request:", err)
 		return
 	}
 
-	clientID := ""
-	clientSecret := ""
+	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
+	clientSecret := os.Getenv("SPOTIFY_CLIENT_SECRET")
 	authStr := fmt.Sprintf("%s:%s", clientID, clientSecret)
 	authStrEncoded := base64.StdEncoding.EncodeToString([]byte(authStr))
 
-	tokenReq.Header.Set("Authorization", fmt.Sprintf("Basic %s", authStrEncoded))
-	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", authStrEncoded))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	tokenRes, err := http.DefaultClient.Do(tokenReq)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Println("error sending token request:", err)
+		return
 	}
+
+	var resBody []byte
+	res.Body.Read(resBody)
+	if res.StatusCode != 200 {
+		fmt.Println("token request unsuccessful:", string(resBody))
+		return
+	}
+
+	var resParsed struct {
+		access_token  string
+		token_type    string
+		scope         string
+		expires_in    int
+		refresh_token string
+	}
+	if err := json.Unmarshal(resBody, &resParsed); err != nil {
+		fmt.Println("error parsing json response:", err)
+		return
+	}
+
+	fmt.Println("access token received:", resParsed.access_token)
 }
 
 func getAuthParams() (string, error) {
