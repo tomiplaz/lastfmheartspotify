@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"text/template"
 
 	"github.com/joho/godotenv"
 )
@@ -17,7 +19,7 @@ import (
 const (
 	authorizeURL      = "https://accounts.spotify.com/authorize"
 	apiTokenURL       = "https://accounts.spotify.com/api/token"
-	redirectURI       = "http://localhost:8080/callback"
+	redirectURI       = "https://127.0.0.1:8443/callback"
 	userLibraryRead   = "user-library-read"
 	userLibraryModify = "user-library-modify"
 )
@@ -30,14 +32,29 @@ func main() {
 		log.Fatalln("error loading .env file")
 	}
 
+	http.HandleFunc("/", index)
 	http.HandleFunc("/login", login)
 	http.HandleFunc("/callback", callback)
 
-	fmt.Println("starting server on :443")
+	fmt.Println("starting server on https://127.0.0.1:8443")
 
-	err := http.ListenAndServeTLS(":443", "certs/server.crt", "certs/server.key", nil)
+	err := http.ListenAndServeTLS("127.0.0.1:8443", "certs/server.crt", "certs/server.key", nil)
 	if err != nil {
 		fmt.Println("error starting server:", err)
+		return
+	}
+}
+
+func index(w http.ResponseWriter, req *http.Request) {
+	tmpl, err := template.ParseFiles("templates/index.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = tmpl.Execute(w, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
@@ -45,7 +62,8 @@ func main() {
 func login(w http.ResponseWriter, req *http.Request) {
 	params, err := getAuthParams()
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	url := fmt.Sprintf("%s?%s", authorizeURL, params)
@@ -57,11 +75,13 @@ func callback(w http.ResponseWriter, req *http.Request) {
 
 	if params.Get("error") != "" {
 		fmt.Println("callback error:", params.Get("error"))
+		http.Error(w, fmt.Sprintf("callback error: %s", params.Get("error")), http.StatusBadRequest)
 		return
 	}
 
 	if params.Get("state") != state {
 		fmt.Println("invalid state value:", params.Get("state"))
+		http.Error(w, "invalid state value", http.StatusBadRequest)
 		return
 	}
 
@@ -74,6 +94,7 @@ func callback(w http.ResponseWriter, req *http.Request) {
 	req, err := http.NewRequestWithContext(req.Context(), "POST", apiTokenURL, reqBody)
 	if err != nil {
 		fmt.Println("error creating token request:", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -88,29 +109,36 @@ func callback(w http.ResponseWriter, req *http.Request) {
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Println("error sending token request:", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	var resBody []byte
-	res.Body.Read(resBody)
+	resBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println("error reading token response body:", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	if res.StatusCode != 200 {
-		fmt.Println("token request unsuccessful:", string(resBody))
+		fmt.Println("token request error:", string(resBytes))
+		http.Error(w, fmt.Sprintf("token request err: %s", string(resBytes)), http.StatusInternalServerError)
 		return
 	}
 
 	var resParsed struct {
-		access_token  string
-		token_type    string
-		scope         string
-		expires_in    int
-		refresh_token string
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		Scope        string `json:"scope"`
+		ExpiresIn    int    `json:"expires_in"`
+		RefreshToken string `json:"refresh_token"`
 	}
-	if err := json.Unmarshal(resBody, &resParsed); err != nil {
-		fmt.Println("error parsing json response:", err)
+	if err := json.Unmarshal(resBytes, &resParsed); err != nil {
+		http.Error(w, fmt.Sprintf("%s: %s", err.Error(), string(resBytes)), http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Println("access token received:", resParsed.access_token)
+	fmt.Println("access token received:", resParsed.AccessToken)
 }
 
 func getAuthParams() (string, error) {
@@ -119,11 +147,12 @@ func getAuthParams() (string, error) {
 		return "", fmt.Errorf("reading random bytes: %w", err)
 	}
 
+	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
 	state = base64.StdEncoding.EncodeToString(bytes)
 	scope := strings.Join([]string{userLibraryRead, userLibraryModify}, " ")
 
 	params := map[string]string{
-		"client_id":     "123",
+		"client_id":     clientID,
 		"response_type": "code",
 		"redirect_uri":  redirectURI,
 		"state":         state,
