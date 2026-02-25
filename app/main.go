@@ -1,31 +1,57 @@
 package main
 
 import (
-	"crypto/rand"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"text/template"
 
 	"github.com/joho/godotenv"
 )
 
 const (
-	authorizeURL      = "https://accounts.spotify.com/authorize"
-	apiTokenURL       = "https://accounts.spotify.com/api/token"
-	redirectURI       = "https://127.0.0.1:8443/callback"
+	authorizeURL = "https://accounts.spotify.com/authorize"
+	apiTokenURL  = "https://accounts.spotify.com/api/token"
+
+	redirectURI = "https://127.0.0.1:8443/callback"
+
 	userLibraryRead   = "user-library-read"
 	userLibraryModify = "user-library-modify"
+
+	searchURL = "https://api.spotify.com/v1/search"
 )
 
-// TODO: Instantiate a request to track instead of it being global
-var state string
+// TODO: Instantiate singletons instead of having globals
+var (
+	state       string
+	accessToken string
+)
+
+type SearchResponse struct {
+	Tracks struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Artists []struct {
+				Name string `json:"name"`
+			} `json:"artists"`
+		} `json:"items"`
+	} `json:"tracks"`
+}
+
+type SpotifyTrack struct {
+	ID     string
+	Name   string
+	Artist string
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -35,6 +61,7 @@ func main() {
 	http.HandleFunc("/", index)
 	http.HandleFunc("/login", login)
 	http.HandleFunc("/callback", callback)
+	http.HandleFunc("/foo", foo)
 
 	fmt.Println("starting server on https://127.0.0.1:8443")
 
@@ -138,7 +165,67 @@ func callback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	fmt.Println("access token received:", resParsed.AccessToken)
+	accessToken = resParsed.AccessToken
+
+	http.Redirect(w, req, "/foo", http.StatusSeeOther)
+}
+
+func foo(w http.ResponseWriter, req *http.Request) {
+	tmpl := template.Must(template.ParseFiles("templates/foo.html"))
+
+	lastFmApiKey := os.Getenv("LAST_FM_API_KEY")
+	if lastFmApiKey == "" {
+		log.Fatalln("LAST_FM_API_KEY not set")
+	}
+
+	lastFmUser := os.Getenv("LAST_FM_USER")
+	if lastFmApiKey == "" {
+		log.Fatalln("LAST_FM_USER not set")
+	}
+
+	lastFm, err := InitLastFm(lastFmUser, lastFmApiKey)
+	if err != nil {
+		log.Fatalln("error initializing LastFm struct: " + err.Error())
+	}
+
+	lovedTracks, err := lastFm.GetLovedTracks(true)
+	if err != nil {
+		log.Fatalln("error getting loved tracks: " + err.Error())
+	}
+
+	count := 3
+	randIndeces := make([]int, 0, count)
+	for range count {
+		randIndeces = append(randIndeces, rand.Intn(len(lovedTracks)))
+	}
+
+	lastFmTracks := make([]LovedTrack, 0, len(randIndeces))
+	spotifyTracks := make([]SpotifyTrack, 0, len(randIndeces))
+	for _, i := range randIndeces {
+		t := lovedTracks[i]
+		lastFmTracks = append(lastFmTracks, t)
+		spotifyTrack, err := doSearchRequest(req.Context(), t.Artist.Name, t.Name)
+		if err != nil {
+			fmt.Println("search spotify track:", err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		spotifyTracks = append(spotifyTracks, spotifyTrack)
+	}
+
+	data := struct {
+		LastFmTracks  []LovedTrack
+		SpotifyTracks []SpotifyTrack
+	}{
+		LastFmTracks:  lastFmTracks,
+		SpotifyTracks: spotifyTracks,
+	}
+
+	if err := tmpl.ExecuteTemplate(w, "foo.html", data); err != nil {
+		fmt.Println("foo template error:", err.Error())
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 func getAuthParams() (string, error) {
@@ -165,4 +252,54 @@ func getAuthParams() (string, error) {
 	}
 
 	return strings.Join(slice, "&"), nil
+}
+
+func doSearchRequest(ctx context.Context, artist string, track string) (SpotifyTrack, error) {
+	endpoint, err := url.Parse(searchURL)
+	if err != nil {
+		return SpotifyTrack{}, fmt.Errorf("parse search url: %w", err)
+	}
+
+	params := url.Values{}
+	params.Set("q", fmt.Sprintf("artist:%s track:%s", artist, track))
+	params.Set("type", "track")
+	endpoint.RawQuery = params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint.String(), nil)
+	if err != nil {
+		return SpotifyTrack{}, fmt.Errorf("create search request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return SpotifyTrack{}, fmt.Errorf("error sending search request: %w", err)
+	}
+
+	resBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return SpotifyTrack{}, fmt.Errorf("error reading search response body: %w", err)
+	}
+
+	if res.StatusCode != 200 {
+		return SpotifyTrack{}, fmt.Errorf("search request error: %s", string(resBytes))
+	}
+
+	var resParsed SearchResponse
+	if err := json.Unmarshal(resBytes, &resParsed); err != nil {
+		return SpotifyTrack{}, fmt.Errorf("unmarshal search response: %w", err)
+	}
+
+	if len(resParsed.Tracks.Items) == 0 {
+		fmt.Printf("no track found for %s - %s\n", artist, track)
+		return SpotifyTrack{}, nil
+	}
+
+	t := resParsed.Tracks.Items[0]
+	return SpotifyTrack{
+		ID:     t.ID,
+		Name:   t.Name,
+		Artist: t.Artists[0].Name,
+	}, nil
 }

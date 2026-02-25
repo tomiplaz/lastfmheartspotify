@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<head>
+  <title>Heart</title>
+</head>
+<body>
+  <h1>Heart</h1>
+  <p>LastFM</p>
+  <ol>
+    {{range .LastFmTracks}}
+    <li>{{.Artist.Name}} - {{.Name}}</li>
+    {{end}}
+  </ol>
+  <p>Spotify</p>
+  <ol>
+    {{range .SpotifyTracks}}
+    <li>{{.ID}}: {{.Artist}} - {{.Name}}</li>
+    {{end}}
+  </ol>
+</body>
+<footer>
+  <p>Thank you</p>
+</footer>
